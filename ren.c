@@ -21,20 +21,21 @@ static int dir_reorder(char *s, char *se, int *ord, int end, int dir)
 {
 	rset *rs = dir < 0 ? dir_rsrl : dir_rslr;
 	int beg = 0, off, c_beg, c_end;
-	int subs[LEN(dmarks[0].dir) * 2], found, i;
+	int subs[LEN(dmarks[0].dir) * 2], gdir, found, i;
 	int flg = se > s && se[-1] == '\n' ? REG_NEWLINE : 0;
 	while (se > s && (found = rset_find(rs, s, subs, flg)) >= 0) {
 		for (i = 0; i < end; i++)
 			ord[i] = i;
 		end = -1;
 		c_end = 0;
-		for (i = 0; i < rs->grpnsubc[found]; i += 2) {
-			off = subs[i];
-			if (off < 0 || dmarks[found].dir[i >> 1] >= 0)
+		for (i = 0; i < rs->setgrpcnt[found]; i++) {
+			gdir = dmarks[found].dir[i];
+			off = subs[i * 2];
+			if (off < 0 || gdir >= 0)
 				continue;
 			c_beg = uc_off(s, off);
-			c_end = c_beg + uc_off(s + off, subs[i + 1] - off);
-			off = subs[i + 1];
+			c_end = c_beg + uc_off(s + off, subs[i * 2 + 1] - off);
+			off = subs[i * 2 + 1];
 			dir_reverse(ord, beg+c_beg, beg+c_end);
 		}
 		beg += c_end ? c_end : 1;
@@ -77,7 +78,7 @@ void dir_init(void)
 static int ren_cwid(char *s, int pos)
 {
 	if (s[0] == '\t')
-		return xts ? xts - (pos % xts) : 0;
+		return xtbs ? xtbs - (pos % xtbs) : 0;
 	if (s[0] == '\n')
 		return 1;
 	int c, l; uc_code(c, s, l)
@@ -243,13 +244,13 @@ static struct ftmap {
 	rset *rs;
 } ftmap[100];
 static int ftmidx;
+static int ftidx;
 static rset *syn_ftrs;
 static int last_scdir;
 static int blockatt;
-int ftidx;
 int syn_blockhl;
 
-static int syn_initft(int fti, int n, char *name, int flg)
+static int syn_initft(int fti, int n, char *name)
 {
 	int i = n, set = hls[i].set;
 	char *pats[hlslen];
@@ -257,7 +258,7 @@ static int syn_initft(int fti, int n, char *name, int flg)
 		pats[i - n] = hls[i].pat;
 	ftmap[fti].setbidx = n;
 	ftmap[fti].ft = name;
-	ftmap[fti].rs = rset_make(i - n, pats, flg);
+	ftmap[fti].rs = rset_make(i - n, pats, 0);
 	ftmap[fti].seteidx = i;
 	return i < hlslen && hls[i].ft == name && hls[i].set != set;
 }
@@ -276,12 +277,12 @@ char *syn_setft(char *ft)
 		if (!strcmp(ft, hls[i].ft)) {
 			default_hl:
 			ftidx = ftmidx;
-			while (syn_initft(ftmidx++, i, hls[i].ft, 0))
+			while (syn_initft(ftmidx++, i, hls[i].ft))
 				i = ftmap[ftmidx-1].seteidx;
 			return ftmap[ftidx].ft;
 		}
 	if (ftmidx)
-		return NULL;
+		return ftmap[ftidx].ft;
 	i = 0;
 	goto default_hl;
 }
@@ -306,21 +307,22 @@ void syn_highlight(int *att, char *s, int n)
 	int fti = ftidx, blockhl = syn_blockhl, blockca = -1;
 	re:;
 	rset *rs = ftmap[fti].rs;
-	int subs[rs->nsubc], *catt, *iatt, sl, c;
-	int cend, sidx = 0, flg = 0, hl, j, i, ii;
+	int subs[rs->grpcnt * 2 + 1], *catt, *iatt, sl, c;
+	int cend, sidx = 0, flg = 0, hl, j, i;
 	while ((sl = rset_find(rs, s + sidx, subs, flg)) >= 0) {
 		cend = 1;
 		hl = sl + ftmap[fti].setbidx;
-		sl = rs->grpnsubc[sl];
+		sl = rs->setgrpcnt[sl];
 		catt = hls[hl].att;
-		for (i = 0, ii = i; ii < sl; ii += 2, i++) {
-			if (subs[ii] < 0 || SYN_IGNSET(catt[i]))
+		for (i = 0; i < sl; i++) {
+			if (subs[i * 2] < 0 || SYN_IGNSET(catt[i]))
 				continue;
-			cend = MAX(cend, subs[ii + 1]);
-			int beg = uc_off(s, sidx + subs[ii]);
-			int end = beg + uc_off(s + sidx + subs[ii], subs[ii + 1] - subs[ii]);
+			cend = MAX(cend, subs[i * 2 + 1]);
+			int beg = uc_off(s, sidx + subs[i * 2]);
+			int end = beg + uc_off(s + sidx + subs[i * 2],
+					subs[i * 2 + 1] - subs[i * 2]);
 			if (SYN_ATTSET(catt[i])) {
-				iatt = &catt[sl >> 1];
+				iatt = &catt[sl];
 				c = *iatt;
 				if (SYN_ATTSET(catt[i]) == SYN_ATT) {
 					for (j = beg; c && j < end; j++)
@@ -366,14 +368,14 @@ char *syn_filetype(char *path)
 	return hl >= 0 && hl < ftslen ? fts[hl].ft : hls[0].ft;
 }
 
-void syn_reloadft(int hl, int flg)
+void syn_reloadft(int hl)
 {
 	if (hl >= 0) {
 		int fti = ftidx;
 		while (fti < ftmidx - 1 && hl >= ftmap[fti].seteidx)
 			fti++;
 		rset *rs = ftmap[fti].rs;
-		syn_initft(fti, ftmap[fti].setbidx, ftmap[fti].ft, flg);
+		syn_initft(fti, ftmap[fti].setbidx, ftmap[fti].ft);
 		if (!ftmap[fti].rs)
 			ftmap[fti].rs = rs;
 		else
